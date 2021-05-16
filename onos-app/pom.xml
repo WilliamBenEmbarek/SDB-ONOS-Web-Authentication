@@ -18,7 +18,7 @@
 
     <groupId>org.student</groupId>
     <artifactId>authenticationportal</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    <version>1.1-SNAPSHOT</version>
     <packaging>bundle</packaging>
 
     <description>ONOS OSGi bundle archetype</description>
@@ -28,8 +28,8 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <onos.version>2.1.0</onos.version>
         <api.version>1.0.0</api.version>
-        <onos.app.name>org.foo.app</onos.app.name>
-        <onos.app.title>Foo App</onos.app.title>
+        <onos.app.name>authenticationPortal</onos.app.name>
+        <onos.app.title>Authentication Portal</onos.app.title>
         <onos.app.origin>Foo, Inc.</onos.app.origin>
         <onos.app.category>default</onos.app.category>
         <api.description>Sample application REST API</api.description>
@@ -175,8 +175,8 @@
                 <configuration>
           <instructions>
             <_wab>src/main/webapp/</_wab>
-            <Include-Resource>WEB-INF/classes/apidoc/swagger.json=target/swagger.json,
-                            {maven-resources}</Include-Resource>
+            <!--<Include-Resource>WEB-INF/classes/apidoc/swagger.json=target/swagger.json,
+                            {maven-resources}</Include-Resource> -->
             <Bundle-SymbolicName>${project.groupId}.${project.artifactId}</Bundle-SymbolicName>
             <Import-Package>*,org.glassfish.jersey.servlet</Import-Package>
             <Web-ContextPath>${web.context}</Web-ContextPath>

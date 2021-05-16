@@ -16,6 +16,7 @@
 package org.student.authenticationportal;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.onosproject.net.ConnectPoint;
 import org.onosproject.net.DeviceId;
@@ -23,6 +24,8 @@ import org.onosproject.net.PortNumber;
 import org.onosproject.net.device.DeviceAdminService;
 import org.onosproject.net.device.DeviceService;
 import org.onosproject.rest.AbstractWebResource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.ws.rs.*;
 import javax.ws.rs.core.MediaType;
@@ -38,10 +41,11 @@ import static org.onosproject.net.DeviceId.deviceId;
 /**
  * Sample web resource.
  */
-@Path("sample")
+@Path("/")
 public class AppWebResource extends AbstractWebResource {
 
-    private final String AUTHENTICATED = "authenticated";
+    private final Logger log = LoggerFactory.getLogger(AppComponent.class);
+    private final String MACADDRESS = "macAddress";
     private static final String INVALID_JSON = "Invalid JSON data";
     private final AuthenticationHandler authenticationHandler = AuthenticationHandler.getInstance();
 
@@ -51,33 +55,39 @@ public class AppWebResource extends AbstractWebResource {
      * @return 200 OK
      */
     @GET
-    @Path("")
+    @Path("/")
     public Response getGreeting() {
         ObjectNode node = mapper().createObjectNode().put("hello", "world");
         return ok(node).build();
     }
 
+    @GET
+    @Path("/test")
+    public Response getTest() {
+        ObjectNode responseBody = new ObjectNode(JsonNodeFactory.instance);
+        responseBody.put("message", "it works!");
+        return Response.status(200).entity(responseBody).build();
+    }
+
     /**
      * Authenticates a client.
      *
-     * @onos.rsModel auth
-     * @param id device identifier
      * @param stream input JSON
      * @return 200 OK if the port state was set to the given value
      */
     @POST
-    @Path("authenticateClient/{id}")
+    @Path("/authenticateClient")
     @Consumes(MediaType.APPLICATION_JSON)
-    @Produces(MediaType.APPLICATION_JSON)
-    public Response authenticateclient(@PathParam("id") String id, InputStream stream) {
+    public Response authenticateclient(InputStream stream) {
         try {
             ObjectNode root = readTreeFromStream(mapper(), stream);
-            JsonNode node = root.path(AUTHENTICATED);
+            log.info("Recieved Request: " + root.toString());
+            JsonNode node = root.get(MACADDRESS);
             if (!node.isMissingNode()) {
-                authenticationHandler.authenticateClient(id);
+                log.info("Authenticating Client " + node.asText());
+                authenticationHandler.authenticateClient(node.asText());
                 return Response.ok().build();
             }
-
             throw new IllegalArgumentException(INVALID_JSON);
         } catch (IOException ioe) {
             throw new IllegalArgumentException(ioe);

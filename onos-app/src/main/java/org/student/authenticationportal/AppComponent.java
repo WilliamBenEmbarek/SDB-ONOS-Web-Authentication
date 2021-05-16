@@ -44,6 +44,7 @@ import java.util.Dictionary;
 import java.util.List;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static org.onlab.util.Tools.get;
 
@@ -54,6 +55,8 @@ import static org.onlab.util.Tools.get;
 public class AppComponent {
 
     private final Logger log = LoggerFactory.getLogger(getClass());
+
+    ConcurrentHashMap<DeviceId, ConcurrentHashMap<MacAddress,PortNumber>> switchTable = new ConcurrentHashMap<>();
 
     @Reference(cardinality = ReferenceCardinality.MANDATORY)
     protected PacketService packetService;
@@ -84,71 +87,141 @@ public class AppComponent {
 
     @Activate
     protected void activate() {
-        cfgService.registerProperties(getClass());
-        log.info("Started");
+        appId = coreService.registerApplication("org.student.lb");
+        TrafficSelector.Builder selector = DefaultTrafficSelector.builder();
+        selector.matchEthType(Ethernet.TYPE_IPV4);
+        packetService.requestPackets(selector.build(), PacketPriority.REACTIVE, appId);
+        packetService.addProcessor(processor, PacketProcessor.director(2));
+        log.info("Started", appId.id());
     }
 
     @Deactivate
     protected void deactivate() {
-        cfgService.unregisterProperties(getClass(), false);
-        log.info("Stopped");
+        flowRuleService.removeFlowRulesById(appId);
+        packetService.removeProcessor(processor);
+        processor = null;log.info("Stopped");
     }
 
     private class ReactivePacketProcessor implements PacketProcessor {
 
         @Override
         public void process(PacketContext context) {
-
-            //If the packet has been handled don't do anything (this occurs when the user is already authenticated)
-            if(context.isHandled()) {
-                return;
-            }
-
             InboundPacket pkt = context.inPacket();
             Ethernet ethPkt = pkt.parsed();
-            //Discard if packet is null.
+
+            //Discard if  packet is null.
             if (ethPkt == null) {
+                log.info("Discarding null packet");
                 return;
             }
 
-            String clientId = ethPkt.getSourceMAC().toString();
-            authenticationHandler.addClient(clientId);
-
-
-            //If it isnt an IPv4 packet we don't bother
-            if (ethPkt.getEtherType() != Ethernet.TYPE_IPV4) return;
-            IPv4 ipv4Packet = (IPv4) ethPkt.getPayload();
-
-            //Create the Traffic Selector and start adding criteria.
-            TrafficSelector.Builder selector = DefaultTrafficSelector.builder();
-            selector.matchEthType(Ethernet.TYPE_IPV4);
-            int srcPort;
-            int[] dstPorts;
-
-
-            //Next we only want to match HTTP/S traffic, as we want to forward these packets to our authentication service
-            //Current theory, no need to install a rule here and that the individual packets can be forwarded
-
-            //Handle HTTP packets here.
-            if (ipv4Packet.getProtocol() == IPv4.PROTOCOL_TCP) {
-                TCP tcpPkt = (TCP) ipv4Packet.getPayload();
-                srcPort = tcpPkt.getSourcePort();
-                dstPorts = new int[]{80, 8008, 8080, 443, 8443};
-                //Very important here: Specify the protocol (TCP, UDP) before specifying transport port.
-                //Specifying only the transport port WILL NOT work.
-
-                //Loop over all http/s ports
-                for (int dstPort : dstPorts) {
-                    selector.matchIPProtocol(IPv4.PROTOCOL_TCP).matchTcpSrc(TpPort.tpPort(srcPort))
-                            .matchTcpDst(TpPort.tpPort(dstPort));
-                }
+            if(ethPkt.getEtherType() != Ethernet.TYPE_IPV4) return;
+            log.info("Proccesing packet request.");
+            log.info(authenticationHandler.DEBUGgetAuthenticated());
+            /*
+                Check if the host has been authenticated, if it has we just forward packets regular using the learning
+                switch otherwise we drop all non HTTP packets and forward all HTTP packets to the authentication portal.
+            */
+            String packetMAC = ethPkt.getSourceMAC().toString();
+            if (authenticationHandler.isAuthenticated(packetMAC)) {
+                log.info("Client : " + ethPkt.getSourceMAC().toString() + " is already authenticated");
+                learningSwitch(context, pkt ,ethPkt);
+            } else {
+                log.info("Client : " + ethPkt.getSourceMAC().toString() + " is not authenticated, forwarding packets to portal");
+                forwardPacketToPortal(context, pkt ,ethPkt);
             }
-            selector.build();
-
         }
     }
 
-    private void forwardPacketToPortal(PacketContext context, TrafficSelector selector) {
+
+    private void learningSwitch(PacketContext context, InboundPacket pkt, Ethernet ethPkt) {
+
+        // First step is to check if the packet came from a newly discovered switch.
+        // Create a new entry if required.
+        DeviceId deviceId = pkt.receivedFrom().deviceId();
+        if (!switchTable.containsKey(deviceId)){
+            log.info("Adding new switch: "+deviceId.toString());
+            ConcurrentHashMap<MacAddress, PortNumber> hostTable = new ConcurrentHashMap<>();
+            switchTable.put(deviceId, hostTable);
+        }
+
+        // Now lets check if the source host is a known host. If it is not add it to the switchTable.
+        ConcurrentHashMap<MacAddress,PortNumber> hostTable = switchTable.get(deviceId);
+        MacAddress srcMac = ethPkt.getSourceMAC();
+        if (!hostTable.containsKey(srcMac)){
+            log.info("Adding new host: "+srcMac.toString()+" for switch "+deviceId.toString());
+            hostTable.put(srcMac,pkt.receivedFrom().port());
+            switchTable.replace(deviceId,hostTable);
+        }
+
+        // To take care of loops, we must drop the packet if the port from which it came from does not match the port that the source host should be attached to.
+        if (!hostTable.get(srcMac).equals(pkt.receivedFrom().port())){
+            log.info("Dropping packet to break loop");
+            return;
+        }
+
+        // Now lets check if we know the destination host. If we do asign the correct output port.
+        // By default set the port to FLOOD.
+        MacAddress dstMac = ethPkt.getDestinationMAC();
+        PortNumber outPort = PortNumber.FLOOD;
+        if (hostTable.containsKey(dstMac)){
+            outPort = hostTable.get(dstMac);
+            log.info("Setting output port to: "+outPort);
+
+        }
+
+        //Generate the traffic selector based on the packet that arrived.
+        TrafficSelector packetSelector = DefaultTrafficSelector.builder()
+                .matchEthType(Ethernet.TYPE_IPV4)
+                .matchEthDst(dstMac).build();
+
+        TrafficTreatment treatment = DefaultTrafficTreatment.builder()
+                .setOutput(outPort).build();
+
+        ForwardingObjective forwardingObjective = DefaultForwardingObjective.builder()
+                .withSelector(packetSelector)
+                .withTreatment(treatment)
+                .withPriority(5000)
+                .withFlag(ForwardingObjective.Flag.VERSATILE)
+                .fromApp(appId)
+                .makeTemporary(5000)
+                .add();
+
+        if (outPort != PortNumber.FLOOD) flowObjectiveService.forward(deviceId,forwardingObjective);
+        context.treatmentBuilder().addTreatment(treatment);
+        log.info("Sending packet");
+        context.send();
+    }
+
+    private void forwardPacketToPortal(PacketContext context, InboundPacket pkt, Ethernet ethPkt) {
+        IPv4 ipv4Packet = (IPv4) ethPkt.getPayload();
+        //Create the Traffic Selector and start adding criteria.
+        TrafficSelector.Builder selector = DefaultTrafficSelector.builder();
+        selector.matchEthType(Ethernet.TYPE_IPV4);
+        selector.matchIPProtocol((byte) 4);
+        int srcPort;
+        int[] dstPorts;
+
+
+        //Next we only want to match HTTP/S traffic, as we want to forward these packets to our authentication service
+
+        //Handle HTTP packets here.
+        if (ipv4Packet.getProtocol() == IPv4.PROTOCOL_TCP) {
+            log.info("Packet is of type IPv4");
+            TCP tcpPkt = (TCP) ipv4Packet.getPayload();
+            srcPort = tcpPkt.getSourcePort();
+            dstPorts = new int[]{80};
+            //uncomment below line once you figure out how to match several ports
+            //dstPorts = new int[]{80, 8008, 8080, 443, 8443};
+            //Very important here: Specify the protocol (TCP, UDP) before specifying transport port.
+            //Specifying only the transport port WILL NOT work.
+
+            //Loop over all http/s ports
+            for (int dstPort : dstPorts) {
+                selector.matchIPProtocol(IPv4.PROTOCOL_TCP).matchTcpSrc(TpPort.tpPort(srcPort))
+                        .matchTcpDst(TpPort.tpPort(dstPort));
+            }
+        }
         //We forward all packets which match our selector (HTTP/S Traffic, to our portal, this rule is temporary).
 
         TrafficTreatment treatment = DefaultTrafficTreatment.builder()
@@ -158,13 +231,40 @@ public class AppComponent {
                 .build();
 
         ForwardingObjective forwardingObjective = DefaultForwardingObjective.builder().withTreatment(treatment)
-                .withSelector(selector)
+                .withSelector(selector.build())
                 .withPriority(100)
                 .withFlag(ForwardingObjective.Flag.VERSATILE)
                 .fromApp(appId)
-                .makeTemporary(10)
+                .makeTemporary(60)
                 .add();
+        log.info("Adding flow objective " + forwardingObjective.toString());
         flowObjectiveService.forward(context.inPacket().receivedFrom().deviceId(), forwardingObjective);
+
+        /*
+            To simplify the process, install also the return route on the LB.
+            Now we need to instruct the LB to change the srcIP and srcMAC from that of the serving server to that of the LB itself.
+        */
+        TrafficTreatment treatment2 = DefaultTrafficTreatment.builder()
+                .setEthSrc(ethPkt.getDestinationMAC())
+                .setIpSrc(IpAddress.valueOf(ipv4Packet.getDestinationAddress()))
+                .setOutput(pkt.receivedFrom().port())
+                .build();
+
+        TrafficSelector.Builder selectorBuilder = DefaultTrafficSelector.builder();
+        selectorBuilder.matchEthType(Ethernet.TYPE_IPV4)
+                .matchIPDst(IpPrefix.valueOf(ipv4Packet.getSourceAddress(), IpPrefix.MAX_INET_MASK_LENGTH))
+                .matchEthDst(ethPkt.getSourceMAC());
+
+        ForwardingObjective forwardingObjective2 = DefaultForwardingObjective.builder().withTreatment(treatment2)
+                .withSelector(selectorBuilder.build())
+                .withPriority(100)
+                .withFlag(ForwardingObjective.Flag.VERSATILE)
+                .fromApp(appId)
+                .makeTemporary(60)
+                .add();
+        log.info("Adding flow objective " + forwardingObjective2.toString());
+        flowObjectiveService.forward(context.inPacket().receivedFrom().deviceId(), forwardingObjective2);
         return;
     }
+
 }

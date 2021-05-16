@@ -3,6 +3,7 @@ module github.com/williambenembarek/onos-portal
 go 1.16
 
 require (
+	github.com/go-resty/resty/v2 v2.6.0
 	github.com/labstack/echo v3.3.10+incompatible
 	github.com/labstack/gommon v0.3.0 // indirect
 	github.com/mattn/go-colorable v0.1.8 // indirect
